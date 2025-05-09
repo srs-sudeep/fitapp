@@ -36,7 +36,7 @@ data class HeartRateDisplayItem(
     val timestamp: Long
 ) {
     val coreTemp: Long
-        get() = bpm * 10
+        get() = bpm  //i have adjusted here
 }
 
 private var exportUriHandler: ((Uri) -> Unit)? = null
@@ -190,7 +190,7 @@ fun HeartRateScreen(
             modifier = Modifier.padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Text("Heart Rate (Last 24 hrs)", style = MaterialTheme.typography.headlineSmall)
+            Text("Heart Rate", style = MaterialTheme.typography.headlineSmall)
             Spacer(modifier = Modifier.height(16.dp))
 
             if (!hasPermission) {
@@ -271,8 +271,8 @@ suspend fun getAllHeartRates(healthConnectClient: HealthConnectClient): List<Hea
             record.samples.map { sample ->
                 HeartRateDisplayItem(
                     bpm = sample.beatsPerMinute,
-                    time = formatter.format(record.startTime),
-                    timestamp = record.startTime.toEpochMilli()
+                    time = formatter.format(sample.time),
+                    timestamp = sample.time.toEpochMilli()
                 )
             }
         }.sortedByDescending { it.timestamp }
