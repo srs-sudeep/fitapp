@@ -1,9 +1,11 @@
 package com.example.healthconnectheartrate
 
 import android.os.Bundle
+import android.content.Context
+import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
-
+import androidx.activity.result.contract.ActivityResultContracts.CreateDocument
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -11,6 +13,7 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.permission.HealthPermission
@@ -18,29 +21,23 @@ import androidx.health.connect.client.PermissionController
 import androidx.health.connect.client.records.HeartRateRecord
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.*
+import java.io.OutputStream
 import java.time.ZonedDateTime
-import java.time.temporal.ChronoUnit
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import android.content.Context
-import android.net.Uri
-import androidx.activity.result.ActivityResultLauncher
-import androidx.activity.result.contract.ActivityResultContracts.CreateDocument
-import androidx.compose.ui.platform.LocalContext
-import kotlinx.coroutines.delay
-import java.io.OutputStream
+import java.time.temporal.ChronoUnit
+
 data class HeartRateDisplayItem(
     val bpm: Long,
     val time: String,
     val timestamp: Long
 ) {
     val coreTemp: Long
-        get() = bpm  //i have adjusted here
+        get() = bpm
 }
 
 private var exportUriHandler: ((Uri) -> Unit)? = null
-
 
 fun exportToCsv(context: Context, uri: Uri, data: List<HeartRateDisplayItem>) {
     try {
@@ -56,46 +53,8 @@ fun exportToCsv(context: Context, uri: Uri, data: List<HeartRateDisplayItem>) {
         e.printStackTrace()
     }
 }
-class MainActivity : ComponentActivity() {
 
-    private lateinit var healthConnectClient: HealthConnectClient
-
-
-
-    private val permissions = setOf(
-        HealthPermission.getReadPermission(HeartRateRecord::class),
-        HealthPermission.getWritePermission(HeartRateRecord::class)
-    )
-
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        healthConnectClient = HealthConnectClient.getOrCreate(this)
-
-        val permissionRequest =
-            registerForActivityResult(PermissionController.createRequestPermissionResultContract()) { grantedPermissions ->
-                // Handle the result: Recomposition in Composable will handle UI update
-            }
-        val exportToCsvLauncher =
-            registerForActivityResult(CreateDocument("text/csv")) { uri ->
-                uri?.let {
-                    exportUriHandler?.invoke(it)
-                }
-            }
-
-        setContent {
-            MaterialTheme {
-                HeartRateScreen(
-                    healthConnectClient = healthConnectClient,
-                    onRequestPermission = { permissionRequest.launch(permissions) },
-                    onExportCsv = { uriHandler ->
-                        exportUriHandler = uriHandler
-                        exportToCsvLauncher.launch("heart_rate_data.csv")
-                    }
-                )
-            }
-        }
-    }
-}
+// Kalman Filter Core Temp Calculation Variables
 var ct: Double = 36.97
 var v: Double = 0.0
 var hrHistory: MutableList<Long> = mutableListOf(1, 2, 3, 4)
@@ -111,48 +70,83 @@ val c2 = 7899.76
 fun calculateCoreTemp(bpm: Long): Long {
     if (hrHistory.size < 5) {
         hrHistory.add(bpm)
-        return (ct * 100).toLong()  // Return default CT initially
+        return (ct * 100).toLong()
     }
 
-    // Update HR moving average
     hrHistory.add(bpm)
     if (hrHistory.size > 5) {
         hrHistory.removeAt(0)
     }
+
     val hr_ma_now = hrHistory.takeLast(5).average()
     val hr_ma_old = hrHistory.first().toDouble()
     val delta_hr = hr_ma_now - hr_ma_old
 
-    // Prediction step
     v += gamma * gamma
 
-    val a: Double
-    val b: Double
-    val c: Double
-    val hr_model: Double
-
-    if (delta_hr < 0) {
-        // Recovery phase
-        a = a2
-        b = b2
-        c = -2 * a2 * ct + b2
-        hr_model = -a2 * ct * ct + b2 * ct - c2
+    val (a, b, c, hr_model) = if (delta_hr < 0) {
+        val cVal = -2 * a2 * ct + b2
+        val model = -a2 * ct * ct + b2 * ct - c2
+        Quadruple(a2, b2, cVal, model)
     } else {
-        // Exercise phase
-        a = a1
-        b = b1
-        c = -2 * a1 * ct + b1
-        hr_model = -a1 * ct * ct + b1 * ct - c1
+        val cVal = -2 * a1 * ct + b1
+        val model = -a1 * ct * ct + b1 * ct - c1
+        Quadruple(a1, b1, cVal, model)
     }
 
-    // Kalman Gain
     val k = (v * c) / (v * c * c + sigma * sigma)
-
-    // Update step
     ct = ct + k * (bpm.toDouble() - hr_model)
     v = (1 - k * c) * v
 
-    return (ct * 100).toLong()  // Return CT in hundredths (e.g., 3697 = 36.97°C)
+    return (ct * 100).toLong()
+}
+
+data class Quadruple<A, B, C, D>(
+    val first: A,
+    val second: B,
+    val third: C,
+    val fourth: D
+)
+
+class MainActivity : ComponentActivity() {
+
+    private lateinit var healthConnectClient: HealthConnectClient
+    private val permissions = setOf(
+        HealthPermission.getReadPermission(HeartRateRecord::class),
+        HealthPermission.getWritePermission(HeartRateRecord::class)
+    )
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        healthConnectClient = HealthConnectClient.getOrCreate(this)
+
+        val permissionRequest =
+            registerForActivityResult(PermissionController.createRequestPermissionResultContract()) { grantedPermissions ->
+                // Trigger recomposition after permission is granted
+            }
+
+        val exportToCsvLauncher =
+            registerForActivityResult(CreateDocument("text/csv")) { uri ->
+                uri?.let {
+                    exportUriHandler?.invoke(it)
+                }
+            }
+
+        setContent {
+            MaterialTheme {
+                HeartRateScreen(
+                    healthConnectClient = healthConnectClient,
+                    onRequestPermission = {
+                        permissionRequest.launch(permissions)
+                    },
+                    onExportCsv = { uriHandler ->
+                        exportUriHandler = uriHandler
+                        exportToCsvLauncher.launch("heart_rate_data.csv")
+                    }
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -166,6 +160,10 @@ fun HeartRateScreen(
     val coroutineScope = rememberCoroutineScope()
     val context = LocalContext.current
 
+    suspend fun loadHeartRates() {
+        heartRates = getAllHeartRates(healthConnectClient)
+    }
+
     LaunchedEffect(Unit) {
         val granted = healthConnectClient.permissionController.getGrantedPermissions()
         hasPermission = granted.containsAll(
@@ -177,9 +175,10 @@ fun HeartRateScreen(
 
         if (hasPermission) {
             coroutineScope.launch {
+                loadHeartRates()
                 while (true) {
-                    heartRates = getAllHeartRates(healthConnectClient)
                     delay(30_000)
+                    loadHeartRates()
                 }
             }
         }
@@ -209,7 +208,7 @@ fun HeartRateScreen(
                     Text("Core Temp", modifier = Modifier.weight(0.25f))
                 }
 
-                HorizontalDivider()
+                Divider()
 
                 LazyColumn(modifier = Modifier.weight(1f)) {
                     items(heartRates) { item ->
@@ -231,7 +230,7 @@ fun HeartRateScreen(
 
                 Spacer(modifier = Modifier.height(16.dp))
 
-                Row {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Button(onClick = {
                         onExportCsv { uri ->
                             exportToCsv(context, uri, heartRates)
@@ -241,7 +240,7 @@ fun HeartRateScreen(
                     }
                     Button(onClick = {
                         coroutineScope.launch {
-                            heartRates = getAllHeartRates(healthConnectClient)
+                            loadHeartRates()
                         }
                     }) {
                         Text("Refresh Data")
